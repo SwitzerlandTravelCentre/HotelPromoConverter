@@ -23,6 +23,8 @@ Run the GUI:
 python PromoConvertv4.py
 ```
 
+`python converter.py` also starts the same GUI for convenience.
+
 Then select:
 
 1. The source `.xlsx` export file.
@@ -31,6 +33,8 @@ Then select:
 4. Convert and save.
 
 The converter writes `promodata.xlsx`. If that file already exists, it writes a timestamped filename such as `promodata_20260611_143012.xlsx` instead of overwriting the existing file.
+
+During conversion, the GUI shows a progress bar and a live log. Longer steps such as Azure Maps geocoding run in the background so the window stays responsive.
 
 ## Expected Input Columns
 
@@ -97,7 +101,15 @@ https://atlas.microsoft.com/geocode?api-version=2025-01-01&subscription-key=...&
 
 Azure Maps returns coordinates as `longitude, latitude`; the converter writes them to Excel as `Latitude`, `Longitude`.
 
-Enter the Azure Maps subscription key in the GUI. The key is used only for the current conversion and is not written to the output file or cache.
+Enter the Azure Maps subscription key in the GUI. The key is never written to the output file or geocoding cache.
+
+To avoid entering the key every time, enable `Save key securely for next time` in the GUI. The converter stores the key encrypted with Windows DPAPI under the current Windows user profile:
+
+```text
+%LOCALAPPDATA%\STC\HotelPromoConverter\azure_maps_subscription_key.bin
+```
+
+Only the same Windows user can decrypt that saved key. Use `Forget saved key` in the GUI to remove it.
 
 As an alternative, store the Azure Maps subscription key outside the code as an environment variable:
 

@@ -300,6 +300,40 @@ class ConverterTests(unittest.TestCase):
             with self.assertRaisesRegex(DataValidationError, "Atlantis, Switzerland"):
                 transform_excel(source, Path(directory) / "out", geocoder=FakeGeocoder())
 
+    def test_reports_progress_messages(self) -> None:
+        with TemporaryDirectory() as directory:
+            workdir = Path(directory)
+            source = workdir / "source.xlsx"
+            output_dir = workdir / "out"
+            messages: list[str] = []
+            write_source(
+                source,
+                [
+                    {
+                        "Status": 11,
+                        "Rsv Number": "006",
+                        "Cancel Number": "",
+                        "Rate": 100,
+                        "Rsv Date1": "2026-06-11",
+                        "Check In": "2026-07-01",
+                        "Check Out": "2026-07-03",
+                        "City": "Bern",
+                    }
+                ],
+            )
+
+            transform_excel(
+                source,
+                output_dir,
+                geocoder=FakeGeocoder(),
+                progress_callback=messages.append,
+            )
+
+            self.assertIn("Reading source workbook", messages)
+            self.assertIn("Normalising city/country and coordinates", messages)
+            self.assertIn("Geocoding Bern, Switzerland", messages)
+            self.assertIn("Conversion complete", messages)
+
 
 if __name__ == "__main__":
     unittest.main()

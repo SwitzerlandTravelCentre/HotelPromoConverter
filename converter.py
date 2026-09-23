@@ -6,7 +6,7 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -45,6 +45,7 @@ LOCATION_COLUMN_GROUPS = {
     "Hotel City": ("Hotel Land", "Hotel Latitude", "Hotel Longitude"),
     "City": ("Land", "Latitude", "Longitude"),
 }
+ProgressCallback = Callable[[str], None]
 
 
 class DataValidationError(RuntimeError):
@@ -63,6 +64,7 @@ class AzureMapsGeocoder:
         timeout_seconds: int = 15,
         retry_count: int = GEOCODE_RETRY_COUNT,
         retry_delay_seconds: float = GEOCODE_RETRY_DELAY_SECONDS,
+        progress_callback: ProgressCallback | None = None,
     ) -> None:
         self.subscription_key = subscription_key
         self.cache_path = cache_path
@@ -72,12 +74,14 @@ class AzureMapsGeocoder:
         self.timeout_seconds = timeout_seconds
         self.retry_count = retry_count
         self.retry_delay_seconds = retry_delay_seconds
+        self.progress_callback = progress_callback
         self._cache = self._load_cache()
 
     def geocode(self, city: str, country: str) -> tuple[float, float] | None:
         cache_key = _location_cache_key(city, country)
 
         if cache_key in self._cache:
+            self._progress(f"Using cached coordinates for {city}, {country}")
             cached = self._cache[cache_key]
             return _coordinates_from_cache(cached) if cached else None
 
@@ -99,6 +103,10 @@ class AzureMapsGeocoder:
             return {}
 
         return data if isinstance(data, dict) else {}
+
+    def _progress(self, message: str) -> None:
+        if self.progress_callback:
+            self.progress_callback(message)
 
     def _fetch_coordinates(self, city: str, country: str) -> tuple[float, float] | None:
         query = f"{city}, {country}"
@@ -337,6 +345,7 @@ def _create_default_geocoder(
     *,
     subscription_key: str | None = None,
     client_id: str | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> AzureMapsGeocoder:
     subscription_key = _azure_maps_subscription_key(subscription_key)
 
@@ -352,7 +361,13 @@ def _create_default_geocoder(
         subscription_key,
         _geocode_cache_path(output_dir, geocode_cache_path),
         client_id=client_id,
+        progress_callback=progress_callback,
     )
+
+
+def _progress(progress_callback: ProgressCallback | None, message: str) -> None:
+    if progress_callback:
+        progress_callback(message)
 
 
 def _move_columns_after(df: pd.DataFrame, anchor_column: str, columns_to_move: Iterable[str]) -> pd.DataFrame:
@@ -397,6 +412,7 @@ def _fill_location_coordinates(
     longitude_column: str,
     geocoder: object,
     resolved_locations: dict[str, tuple[float, float] | None],
+    progress_callback: ProgressCallback | None,
 ) -> list[str]:
     unresolved_locations = []
 
@@ -410,6 +426,7 @@ def _fill_location_coordinates(
         if not city or not country:
             continue
 
+        _progress(progress_callback, f"Geocoding {city}, {country}")
         coordinates = _resolve_coordinates(geocoder, city, country, resolved_locations)
 
         if not coordinates:
@@ -423,7 +440,11 @@ def _fill_location_coordinates(
     return unresolved_locations
 
 
-def _normalise_location_columns(df: pd.DataFrame, geocoder: object | None = None) -> pd.DataFrame:
+def _normalise_location_columns(
+    df: pd.DataFrame,
+    geocoder: object | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> pd.DataFrame:
     resolved_locations: dict[str, tuple[float, float] | None] = {}
     unresolved_locations: set[str] = set()
 
@@ -450,6 +471,7 @@ def _normalise_location_columns(df: pd.DataFrame, geocoder: object | None = None
                     longitude_column,
                     geocoder,
                     resolved_locations,
+                    progress_callback,
                 )
             )
 
@@ -508,15 +530,19 @@ def transform_excel(
     geocode_cache_path: str | Path | None = None,
     azure_maps_subscription_key: str | None = None,
     azure_maps_client_id: str | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> Path:
     source_path = Path(input_path)
     target_dir = Path(output_dir)
     salt = anonymization_salt or os.getenv(ANONYMIZATION_SALT_ENV, DEFAULT_ANONYMIZATION_SALT)
 
     try:
+        _progress(progress_callback, "Reading source workbook")
         df = _read_source_workbook(source_path)
+        _progress(progress_callback, "Validating required columns")
         _validate_required_columns(df.columns)
 
+        _progress(progress_callback, "Calculating booking and cancellation fields")
         df["QtyCorrect"] = pd.to_numeric(df["Status"], errors="coerce").map({11: 1, 13: 2})
 
         cancel_clean = df["Cancel Number"].astype("string").str.strip()
@@ -531,6 +557,7 @@ def transform_excel(
         df["NotTravelled"] = df["Rate"].where(cancelled, "")
         df["travelled"] = df["Rate"].where(active, "")
 
+        _progress(progress_callback, "Cleaning date fields")
         df["Rsv Date1"] = _clean_datetime_series(df["Rsv Date1"], "Rsv Date1")
         df["Check In"] = _clean_datetime_series(df["Check In"], "Check In")
         df["Check Out"] = _clean_datetime_series(df["Check Out"], "Check Out")
@@ -541,6 +568,7 @@ def transform_excel(
         df["Check Out"] = df["Check Out"].dt.date
         df["Booking Hour"] = df["Rsv Date1"].dt.hour.astype("Int64")
 
+        _progress(progress_callback, "Anonymising personal and booking data")
         for column in PERSONAL_COLUMNS:
             if column in df.columns:
                 df[column] = _anonymize_series(df[column], column.lower(), salt)
@@ -559,28 +587,41 @@ def transform_excel(
         has_location_columns = any(column in df.columns for column in LOCATION_COLUMN_GROUPS)
 
         if geocode_locations and geocoder is None and has_location_columns:
+            _progress(progress_callback, "Preparing Azure Maps geocoding")
             geocoder = _create_default_geocoder(
                 target_dir,
                 geocode_cache_path,
                 subscription_key=azure_maps_subscription_key,
                 client_id=azure_maps_client_id,
+                progress_callback=progress_callback,
             )
         elif not geocode_locations:
             geocoder = None
 
-        df = _normalise_location_columns(df, geocoder)
+        _progress(progress_callback, "Normalising city/country and coordinates")
+        df = _normalise_location_columns(df, geocoder, progress_callback)
 
+        _progress(progress_callback, "Dropping sensitive source columns")
         df.drop(columns=list(DROP_COLUMNS), inplace=True, errors="ignore")
 
         target_dir.mkdir(parents=True, exist_ok=True)
         output_path = _unique_output_path(target_dir, output_filename)
+        _progress(progress_callback, f"Writing output workbook: {output_path.name}")
         df.to_excel(output_path, index=False, sheet_name="Sheet1", engine="openpyxl")
 
         if isinstance(geocoder, AzureMapsGeocoder):
+            _progress(progress_callback, "Saving geocoding cache")
             geocoder.save()
 
+        _progress(progress_callback, "Conversion complete")
         return output_path
     except DataValidationError:
         raise
     except Exception as error:
         raise RuntimeError(f"Error during transformation: {error}") from error
+
+
+if __name__ == "__main__":
+    from gui import run_gui
+
+    run_gui()
