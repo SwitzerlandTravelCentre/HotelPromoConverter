@@ -7,6 +7,7 @@ venv/
 *.pyc
 *.pyo
 *.log
+.azure_maps_geocode_cache.json
 *.xls
 *.xlsx
 !requirements.txt
